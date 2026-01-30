@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/akamai/AkamaiOPEN-edgegrid-golang/v9/pkg/edgegrid"
@@ -60,9 +61,15 @@ func PurgeHandler(ctx v1alpha1.Context) func(c *fiber.Ctx) error {
 			})
 		}
 
+		// Duplicate URLs with imbypass=true parameter for URL purge type
+		pathsToPurge := req.Paths
+		if req.PurgeType == "urls" {
+			pathsToPurge = duplicateURLsWithBypass(req.Paths, ctx)
+		}
+
 		// Create the payload for Akamai
 		akamaiPayload := map[string]interface{}{
-			"objects": req.Paths,
+			"objects": pathsToPurge,
 		}
 
 		// Marshal the payload to JSON
@@ -134,35 +141,83 @@ func executePurgeRequest(paths []string, ctx v1alpha1.Context) {
 	client := &http.Client{}
 
 	for _, path := range paths {
-		// Create the HTTP GET request
-		getRequest, err := http.NewRequest("GET", path, nil)
+		// Create list of URLs to request: original + version with imbypass=true
+		urlsToRequest := []string{path}
+
+		// Add the URL with imbypass=true query parameter
+		urlWithBypass, err := addQueryParam(path, "imbypass", "true")
 		if err != nil {
-			ctx.Logger.Errorf("Failed to create GET request for %s: %v\n", path, err)
-			continue
+			ctx.Logger.Warnf("Failed to add imbypass parameter to %s: %v\n", path, err)
+		} else {
+			urlsToRequest = append(urlsToRequest, urlWithBypass)
 		}
 
-		// Add custom headers from configuration
-		for key, value := range ctx.Config.PostPurgeRequest.Headers {
-			getRequest.Header.Set(key, value)
-		}
+		// Send GET requests to all URLs (original + with imbypass)
+		for _, requestURL := range urlsToRequest {
+			// Create the HTTP GET request
+			getRequest, err := http.NewRequest("GET", requestURL, nil)
+			if err != nil {
+				ctx.Logger.Errorf("Failed to create GET request for %s: %v\n", requestURL, err)
+				continue
+			}
 
-		// Send the GET request
-		response, err := client.Do(getRequest)
-		if err != nil {
-			ctx.Logger.Errorf("Failed to send GET request to %s: %v\n", path, err)
-			continue
-		}
+			// Add custom headers from configuration
+			for key, value := range ctx.Config.PostPurgeRequest.Headers {
+				getRequest.Header.Set(key, value)
+			}
 
-		// Read and discard the body to complete the request properly
-		_, err = io.ReadAll(response.Body)
-		if err != nil {
-			ctx.Logger.Warnf("Failed to read response body from %s: %v\n", path, err)
-		}
-		response.Body.Close()
+			// Send the GET request
+			response, err := client.Do(getRequest)
+			if err != nil {
+				ctx.Logger.Errorf("Failed to send GET request to %s: %v\n", requestURL, err)
+				continue
+			}
 
-		// Log the response status
-		ctx.Logger.Infof("GET request to %s returned status code %d\n", path, response.StatusCode)
+			// Read and discard the body to complete the request properly
+			_, err = io.ReadAll(response.Body)
+			if err != nil {
+				ctx.Logger.Warnf("Failed to read response body from %s: %v\n", requestURL, err)
+			}
+			response.Body.Close()
+
+			// Log the response status
+			ctx.Logger.Infof("GET request to %s returned status code %d\n", requestURL, response.StatusCode)
+		}
 	}
+}
+
+// duplicateURLsWithBypass creates a new list with original URLs plus versions with imbypass=true
+func duplicateURLsWithBypass(paths []string, ctx v1alpha1.Context) []string {
+	result := make([]string, 0, len(paths)*2)
+
+	for _, path := range paths {
+		// Add the original URL
+		result = append(result, path)
+
+		// Add the URL with imbypass=true parameter
+		urlWithBypass, err := addQueryParam(path, "imbypass", "true")
+		if err != nil {
+			ctx.Logger.Warnf("Failed to add imbypass parameter to %s: %v\n", path, err)
+			continue
+		}
+		result = append(result, urlWithBypass)
+	}
+
+	return result
+}
+
+// addQueryParam adds a query parameter to a URL
+func addQueryParam(urlStr, key, value string) (string, error) {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return "", err
+	}
+
+	query := parsedURL.Query()
+	query.Set(key, value)
+	parsedURL.RawQuery = query.Encode()
+
+	return parsedURL.String(), nil
 }
 
 func is2xx(status int) bool {

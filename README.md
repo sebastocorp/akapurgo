@@ -79,12 +79,31 @@ For purging content, the application provides a POST endpoint at `/api/v1/purge`
     "purgeType": "urls", // "urls" or "cache-tags"
     "actionType": "invalidate", // "invalidate" or "delete"
     "environment": "production", // "production" or "staging"
+    "postPurgeRequest": true, // Optional: Send GET requests after purge to warm the cache
     "paths": [ // List of paths to purge or cache tags to delete (depending on the purgeType)
       "/path1",
       "/path2"
     ]
 }
 ```
+
+### URL Duplication with imbypass Parameter
+
+When using `purgeType: "urls"`, the application automatically duplicates each URL by adding the query parameter `imbypass=true`. This ensures that both the original URL and its bypass variant are purged from the Akamai cache.
+
+**Example:**
+If you request purging for `https://example.com/page`, the system will purge:
+- `https://example.com/page`
+- `https://example.com/page?imbypass=true`
+
+This duplication applies to:
+1. **Akamai Purge Request**: Both URL variants are sent to Akamai for cache invalidation/deletion
+2. **Post-Purge GET Requests**: If `postPurgeRequest` is enabled, GET requests are sent to both variants to warm the cache
+
+URLs with existing query parameters are handled correctly:
+- `https://example.com/page?foo=bar` becomes both:
+  - `https://example.com/page?foo=bar`
+  - `https://example.com/page?foo=bar&imbypass=true`
 ## Logging
 The project includes extensive logging capabilities. The logs can be configured in the config.yaml file under the logs section.  Example log fields:  
 * REQUEST:method: HTTP method of the request.
